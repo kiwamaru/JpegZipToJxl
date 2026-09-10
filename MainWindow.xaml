@@ -2,8 +2,8 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="画像ZIP → JPEG XL ZIP"
-        Width="720" Height="580"
-        MinWidth="600" MinHeight="480"
+        Width="720" Height="660"
+        MinWidth="600" MinHeight="560"
         AllowDrop="True"
         DragOver="Window_DragOver"
         Drop="Window_Drop">
@@ -27,12 +27,22 @@
                        FontSize="16"/>
         </Border>
 
-        <GroupBox Grid.Row="2" x:Name="SettingsBox" Header="画質" Margin="0,0,0,12">
+        <GroupBox Grid.Row="2" x:Name="SettingsBox" Header="変換設定" Margin="0,0,0,12">
             <StackPanel Margin="4">
-                <ComboBox x:Name="PresetBox" Width="180" HorizontalAlignment="Left"
-                          SelectionChanged="PresetBox_SelectionChanged"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="画質:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <ComboBox x:Name="PresetBox" Width="180"
+                              SelectionChanged="PresetBox_SelectionChanged"/>
+                </StackPanel>
                 <TextBlock x:Name="PresetDescription" Margin="0,8,0,0" MinHeight="34"
                            Foreground="#666" TextWrapping="Wrap"/>
+
+                <CheckBox x:Name="OverwriteOption" Margin="0,10,0,0"
+                          Checked="OverwriteOption_Checked"
+                          Content="変換に成功したら元のZIPを上書きする"/>
+                <TextBlock x:Name="OutputDescription" Margin="22,4,0,0"
+                           Foreground="#666" TextWrapping="Wrap"
+                           Text="オフのときは、元のZIPと同じフォルダに「元の名前_jxl.zip」を作成します。"/>
             </StackPanel>
         </GroupBox>
 

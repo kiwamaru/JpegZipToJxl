@@ -47,6 +47,19 @@ public partial class MainWindow : Window
         PresetDescription.Text = ((JxlPreset)PresetBox.SelectedItem).Description;
     }
 
+    // 元のZIPが失われる設定のため、オンにした時点で一度だけ確認する。
+    private void OverwriteOption_Checked(object sender, RoutedEventArgs e)
+    {
+        var result = MessageBox.Show(
+            "変換に成功すると、元のZIPファイルが変換後のZIPで置き換えられます。\n" +
+            "元のファイルは残らず、この操作は取り消せません。\n\n" +
+            "この設定を有効にしますか？",
+            "元のZIPを上書きする", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+        if (result != MessageBoxResult.Yes)
+            OverwriteOption.IsChecked = false;
+    }
+
     private void Window_DragOver(object sender, DragEventArgs e)
     {
         if (_running)
@@ -87,10 +100,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        await ConvertZipAsync(files[0], (JxlPreset)PresetBox.SelectedItem);
+        await ConvertZipAsync(files[0], (JxlPreset)PresetBox.SelectedItem,
+                              OverwriteOption.IsChecked == true);
     }
 
-    private async Task ConvertZipAsync(string inputZip, JxlPreset preset)
+    private async Task ConvertZipAsync(string inputZip, JxlPreset preset, bool overwriteSource)
     {
         _running = true;
         SettingsBox.IsEnabled = false;
@@ -106,9 +120,15 @@ public partial class MainWindow : Window
         Directory.CreateDirectory(extractDir);
         Directory.CreateDirectory(outputDir);
 
+        string inputDir = Path.GetDirectoryName(inputZip)!;
         string outputZip = Path.Combine(
-            Path.GetDirectoryName(inputZip)!,
-            Path.GetFileNameWithoutExtension(inputZip) + "_jxl.zip");
+            inputDir, Path.GetFileNameWithoutExtension(inputZip) + "_jxl.zip");
+
+        // 上書き時は、まず同じフォルダの一時ファイルへ書き出す。
+        // 変換が最後まで成功したときだけ、元のZIPと置き換える。
+        string zipTarget = overwriteSource
+            ? Path.Combine(inputDir, $".jxlconv_{Guid.NewGuid():N}.tmp")
+            : outputZip;
 
         try
         {
@@ -129,6 +149,9 @@ public partial class MainWindow : Window
             }
 
             Log($"変換対象: {targets.Count} ファイル");
+            Log(overwriteSource
+                ? "出力: 元のZIPを上書きします。"
+                : $"出力: {outputZip}");
 
             if (preset.Options.Mode == JxlMode.Lossless)
             {
@@ -192,7 +215,13 @@ public partial class MainWindow : Window
                 copied++;
             }
 
-            if (File.Exists(outputZip))
+            if (overwriteSource && converted == 0)
+            {
+                throw new InvalidOperationException(
+                    "変換できたファイルが1つも無いため、元のZIPは変更していません。");
+            }
+
+            if (!overwriteSource && File.Exists(outputZip))
             {
                 var result = MessageBox.Show(
                     $"出力先が既に存在します。\n\n{outputZip}\n\n上書きしますか？",
@@ -206,15 +235,36 @@ public partial class MainWindow : Window
 
             Log("変換後ZIPを作成しています...");
             await Task.Run(() => ZipFile.CreateFromDirectory(
-                outputDir, outputZip, CompressionLevel.Optimal, includeBaseDirectory: false));
+                outputDir, zipTarget, CompressionLevel.Optimal, includeBaseDirectory: false));
+
+            string finalZip = outputZip;
+
+            if (overwriteSource)
+            {
+                // 書き出しが終わってから置き換えるため、途中で失敗しても元のZIPは残る。
+                try
+                {
+                    File.Replace(zipTarget, inputZip, destinationBackupFileName: null);
+                }
+                catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+                {
+                    throw new InvalidOperationException(
+                        "元のZIPを置き換えられませんでした。元のZIPはそのまま残っています。\n"
+                        + "読み取り専用になっていないか、他のプログラムが開いていないかご確認ください。\n\n"
+                        + inputZip, ex);
+                }
+
+                finalZip = inputZip;
+                Log("元のZIPを置き換えました。");
+            }
 
             Progress.Value = 100;
             StatusText.Text = "完了";
             Log($"変換 {converted} ファイル / コピー {copied} ファイル");
-            Log($"出力: {outputZip}");
+            Log($"出力: {finalZip}");
 
             MessageBox.Show(
-                $"変換が完了しました。\n\n{outputZip}",
+                $"変換が完了しました。\n\n{finalZip}",
                 "完了", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
@@ -230,6 +280,10 @@ public partial class MainWindow : Window
             {
                 if (Directory.Exists(tempRoot))
                     Directory.Delete(tempRoot, recursive: true);
+
+                // 置き換えに至らなかった場合、一時ファイルが残る
+                if (overwriteSource && File.Exists(zipTarget))
+                    File.Delete(zipTarget);
             }
             catch
             {
