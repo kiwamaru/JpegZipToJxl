@@ -153,6 +153,22 @@ UTF-8フラグが立っているエントリは、この指定に関わらずUTF
 libjxlのネイティブDLL (`jxl.dll` など) はJxlNetパッケージに同梱されているため、
 `cjxl.exe` の配置は不要です。
 
+## アイコン
+
+`JpegZipToJxl.ico` は `tools/MakeIcon` で生成しています。図案はコードで描いているため、
+色や形を変えたい場合はこのプロジェクトを編集して再生成します。
+
+```powershell
+# リポジトリ直下の JpegZipToJxl.ico を上書き
+dotnet run --project tools/MakeIcon
+
+# 出力先と、全サイズを並べた確認用画像を指定する
+dotnet run --project tools/MakeIcon -- JpegZipToJxl.ico preview.png
+```
+
+16 / 20 / 24 / 32 / 48 / 64 / 128 / 256px の8サイズを収録します。
+32px以下は「JXL」の文字が潰れて読めないため、写真だけの図案に切り替えています。
+
 ## ビルド
 
 ```powershell

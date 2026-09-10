@@ -8,10 +8,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Platforms>AnyCPU</Platforms>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationIcon>JpegZipToJxl.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="JxlNet" Version="0.12.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- tools 配下は独立したプロジェクトなので、本体のビルド対象から外す -->
+    <Compile Remove="tools\**" />
+    <None Remove="tools\**" />
   </ItemGroup>
 
 </Project>
