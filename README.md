@@ -180,3 +180,17 @@ dotnet build -c Release
 ```powershell
 dotnet run -c Release
 ```
+
+## ライセンス
+
+MIT License （[LICENSE](LICENSE)）
+
+このツールは以下のコンポーネントを利用しています。詳細は
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) を参照してください。
+
+- [JxlNet](https://github.com/Guerra24/JxlNet) — BSD 3-Clause
+- [libjxl](https://github.com/libjxl/libjxl) — BSD 3-Clause
+- [Brotli](https://github.com/google/brotli) — MIT
+
+ビルド成果物には libjxl と Brotli のネイティブライブラリが含まれるため、
+実行ファイルを配布する場合は THIRD-PARTY-NOTICES.md も併せて配布してください。
