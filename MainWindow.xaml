@@ -16,9 +16,13 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Text="画像ZIP → JPEG XL ZIP"
-                   FontSize="24" FontWeight="Bold"
-                   Margin="0,0,0,16"/>
+        <Grid Margin="0,0,0,16">
+            <TextBlock Text="画像ZIP → JPEG XL ZIP"
+                       FontSize="24" FontWeight="Bold"/>
+            <TextBlock x:Name="VersionText"
+                       HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                       Margin="0,0,2,4" Foreground="#888"/>
+        </Grid>
 
         <Border Grid.Row="1" BorderBrush="#888" BorderThickness="2"
                 CornerRadius="8" Padding="24" Margin="0,0,0,12">

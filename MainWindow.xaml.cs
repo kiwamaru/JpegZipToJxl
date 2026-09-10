@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using System.Reflection;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -33,6 +34,22 @@ public partial class MainWindow : Window
 
         // ラベルを作ってから動かす。ValueChanged で選択中の表示が更新される。
         PresetSlider.Value = JxlPreset.DefaultIndex;
+
+        VersionText.Text = $"v{AppVersion}   libjxl {JxlTranscoder.LibraryVersion}";
+    }
+
+    /// <summary>csproj の &lt;Version&gt; から埋め込まれたバージョン。</summary>
+    private static string AppVersion
+    {
+        get
+        {
+            string? version = Assembly.GetExecutingAssembly()
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                ?.InformationalVersion;
+
+            // ビルド構成によっては "1.0.0+<commit hash>" の形になる。
+            return version?.Split('+')[0] ?? "?";
+        }
     }
 
     private JxlPreset SelectedPreset => JxlPreset.All[(int)PresetSlider.Value];
@@ -194,6 +211,9 @@ public partial class MainWindow : Window
 
         try
         {
+            // 不具合の報告を受けたときに、どの版で起きたかを追えるようにする
+            Log($"JpegZipToJxl v{AppVersion} (libjxl {JxlTranscoder.LibraryVersion})");
+
             Log(inputZips.Length == 1
                 ? $"入力: {inputZips[0]}"
                 : $"入力: {inputZips.Length} 個のZIP");

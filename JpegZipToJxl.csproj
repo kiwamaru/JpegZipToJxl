@@ -11,6 +11,15 @@
     <ApplicationIcon>JpegZipToJxl.ico</ApplicationIcon>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <Version>1.0.0</Version>
+    <Product>JpegZipToJxl</Product>
+    <Authors>kiwamaru</Authors>
+    <Company>kiwamaru</Company>
+    <Copyright>Copyright (c) 2026 kiwamaru</Copyright>
+    <Description>ZIP内の画像をJPEG XLへ変換するツール</Description>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="JxlNet" Version="0.12.0.2" />
   </ItemGroup>

@@ -51,6 +51,19 @@ internal static unsafe class JxlTranscoder
     public static bool IsSupported(string path)
         => SupportedExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// 実際に読み込まれた libjxl のバージョン。
+    /// libjxl は major * 1000000 + minor * 1000 + patch の形で返す。
+    /// </summary>
+    public static string LibraryVersion
+    {
+        get
+        {
+            uint version = Jxl.JxlEncoderVersion();
+            return $"{version / 1000000}.{version / 1000 % 1000}.{version % 1000}";
+        }
+    }
+
     public static JxlResult Encode(byte[] source, JxlOptions options)
     {
         // 画素へ戻さない可逆transcodeはJPEG入力にしか使えない。
