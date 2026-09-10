@@ -1,19 +1,50 @@
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using System.Text;
 using System.Windows;
+using System.Windows.Controls;
 
 namespace JpegZipToJxl;
 
 public partial class MainWindow : Window
 {
-    // エンコード努力量。大きいほど一般に遅くなる。
-    private const int Effort = 7;
+    /// <summary>
+    /// ZIPのエントリ名にUTF-8フラグが無いときの解釈に使うエンコーディング。
+    /// Windowsのエクスプローラなど多くのツールは、システム既定のANSIコードページで書き込む。
+    /// UTF-8フラグが立っているエントリは、この指定に関わらずUTF-8として読まれる。
+    /// </summary>
+    private static readonly Encoding ZipEntryNameEncoding = CreateZipEntryNameEncoding();
 
     private bool _running;
 
     public MainWindow()
     {
         InitializeComponent();
+
+        PresetBox.ItemsSource = JxlPreset.All;
+        PresetBox.SelectedIndex = JxlPreset.DefaultIndex;
+    }
+
+    private static Encoding CreateZipEntryNameEncoding()
+    {
+        // .NET Core 以降、CP932 などのレガシーコードページは既定では使えない。
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+
+        try
+        {
+            return Encoding.GetEncoding(CultureInfo.CurrentCulture.TextInfo.ANSICodePage);
+        }
+        catch (Exception)
+        {
+            return Encoding.UTF8;
+        }
+    }
+
+    // JxlPreset は internal のため、説明文はバインディングではなくコードで反映する。
+    private void PresetBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        PresetDescription.Text = ((JxlPreset)PresetBox.SelectedItem).Description;
     }
 
     private void Window_DragOver(object sender, DragEventArgs e)
@@ -56,12 +87,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        await ConvertZipAsync(files[0]);
+        await ConvertZipAsync(files[0], (JxlPreset)PresetBox.SelectedItem);
     }
 
-    private async Task ConvertZipAsync(string inputZip)
+    private async Task ConvertZipAsync(string inputZip, JxlPreset preset)
     {
         _running = true;
+        SettingsBox.IsEnabled = false;
         Progress.Value = 0;
         LogBox.Clear();
 
@@ -83,50 +115,81 @@ public partial class MainWindow : Window
             Log($"入力: {inputZip}");
             Log("ZIPを展開しています...");
 
-            await Task.Run(() => ZipFile.ExtractToDirectory(inputZip, extractDir, overwriteFiles: true));
+            await Task.Run(() => ZipFile.ExtractToDirectory(
+                inputZip, extractDir, ZipEntryNameEncoding, overwriteFiles: true));
 
-            var jpegFiles = Directory.EnumerateFiles(
-                    extractDir, "*", SearchOption.AllDirectories)
-                .Where(IsJpeg)
-                .ToList();
+            var allFiles = Directory.EnumerateFiles(
+                extractDir, "*", SearchOption.AllDirectories).ToList();
 
-            if (jpegFiles.Count == 0)
+            var targets = allFiles.Where(JxlTranscoder.IsSupported).ToList();
+
+            if (targets.Count == 0)
             {
-                throw new InvalidOperationException("ZIP内にJPEGファイルがありません。");
+                throw new InvalidOperationException("ZIP内に変換できる画像ファイルがありません。");
             }
 
-            Log($"JPEG: {jpegFiles.Count} ファイル");
-            Log("JPEG XLへ変換します。");
-            Log("※ JPEG入力ではlibjxlのlossless JPEG transcodingを使用します。");
+            Log($"変換対象: {targets.Count} ファイル");
 
+            if (preset.Options.Mode == JxlMode.Lossless)
+            {
+                Log($"画質: {preset.Name}");
+                Log("※ JPEGは元のファイルをバイト単位で復元できます。");
+                Log("※ JPEG以外は画素が一致しますが、元のファイル形式へは戻せません。");
+            }
+            else
+            {
+                Log($"画質: {preset.Name} (distance = {preset.Options.Distance:F1})");
+                Log("※ 不可逆変換です。EXIFなどのメタデータは引き継がれません。");
+            }
+
+            // 拡張子を .jxl へ変えると別形式の同名ファイル同士が衝突しうるため、
+            // 使用済みの出力パスを覚えておく。
+            var usedOutputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             int completed = 0;
+            int converted = 0;
+            int copied = 0;
 
-            foreach (var inputFile in jpegFiles)
+            foreach (var inputFile in targets)
             {
                 string relative = Path.GetRelativePath(extractDir, inputFile);
                 string outputFile = Path.Combine(
-                    outputDir,
-                    Path.ChangeExtension(relative, ".jxl"));
+                    outputDir, ResolveOutputName(relative, usedOutputs));
 
                 Directory.CreateDirectory(Path.GetDirectoryName(outputFile)!);
 
-                await TranscodeAsync(inputFile, outputFile);
+                string? failure = await EncodeAsync(inputFile, outputFile, preset.Options, Log);
+
+                if (failure == null)
+                {
+                    converted++;
+                }
+                else
+                {
+                    // デコードできない形式や壊れたファイルは、変換せずそのまま残す。
+                    Log($"変換できないためコピーします: {relative} ({failure})");
+
+                    string dest = Path.Combine(outputDir, relative);
+                    Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                    File.Copy(inputFile, dest, overwrite: true);
+                    copied++;
+                }
 
                 completed++;
-                Progress.Value = completed * 100.0 / jpegFiles.Count;
-                StatusText.Text = $"{completed}/{jpegFiles.Count}: {relative}";
+                Progress.Value = completed * 100.0 / targets.Count;
+                StatusText.Text = $"{completed}/{targets.Count}: {relative}";
             }
 
-            // JPEG以外のファイル（txt等）はそのままコピー
-            foreach (var other in Directory.EnumerateFiles(extractDir, "*", SearchOption.AllDirectories))
+            // 画像以外のファイル（txt等）はそのままコピー
+            foreach (var other in allFiles)
             {
-                if (IsJpeg(other))
+                if (JxlTranscoder.IsSupported(other))
                     continue;
 
                 string relative = Path.GetRelativePath(extractDir, other);
                 string dest = Path.Combine(outputDir, relative);
                 Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                 File.Copy(other, dest, overwrite: true);
+                copied++;
             }
 
             if (File.Exists(outputZip))
@@ -147,6 +210,7 @@ public partial class MainWindow : Window
 
             Progress.Value = 100;
             StatusText.Text = "完了";
+            Log($"変換 {converted} ファイル / コピー {copied} ファイル");
             Log($"出力: {outputZip}");
 
             MessageBox.Show(
@@ -172,33 +236,52 @@ public partial class MainWindow : Window
                 // 後始末失敗は本処理の失敗にはしない
             }
 
+            SettingsBox.IsEnabled = true;
             _running = false;
         }
     }
 
-    private static async Task TranscodeAsync(string input, string output)
+    /// <summary>
+    /// 変換後の相対パスを決める。既に同じ名前を使っていれば元の拡張子を残す。
+    /// </summary>
+    private static string ResolveOutputName(string relative, HashSet<string> used)
     {
-        byte[] jpeg = await File.ReadAllBytesAsync(input);
+        string candidate = Path.ChangeExtension(relative, ".jxl");
 
-        byte[] jxl;
+        if (used.Contains(candidate))
+            candidate = relative + ".jxl";
+
+        string baseName = candidate;
+        for (int n = 2; used.Contains(candidate); n++)
+            candidate = Path.ChangeExtension(baseName, null) + $"_{n}.jxl";
+
+        used.Add(candidate);
+        return candidate;
+    }
+
+    /// <summary>
+    /// 1ファイルを変換する。変換できなかった場合はその理由を返す。
+    /// </summary>
+    private static async Task<string?> EncodeAsync(
+        string input, string output, JxlOptions options, Action<string> log)
+    {
+        byte[] source = await File.ReadAllBytesAsync(input);
+
+        JxlResult result;
         try
         {
-            jxl = await Task.Run(() => JxlTranscoder.TranscodeJpeg(jpeg, Effort));
+            result = await Task.Run(() => JxlTranscoder.Encode(source, options));
         }
         catch (Exception ex)
         {
-            throw new InvalidOperationException(
-                $"変換に失敗しました: {Path.GetFileName(input)}\n{ex.Message}", ex);
+            return ex.Message.ReplaceLineEndings(" ");
         }
 
-        await File.WriteAllBytesAsync(output, jxl);
-    }
+        if (result.Warning != null)
+            log($"注意: {Path.GetFileName(input)} — {result.Warning}");
 
-    private static bool IsJpeg(string path)
-    {
-        string ext = Path.GetExtension(path);
-        return ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
-               ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase);
+        await File.WriteAllBytesAsync(output, result.Data);
+        return null;
     }
 
     private void Log(string text)

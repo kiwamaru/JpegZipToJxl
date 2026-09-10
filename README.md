@@ -6,24 +6,83 @@ WPF / C# (.NET 10) の簡易ツールです。
 
 1. ZIPをウィンドウへドラッグ＆ドロップ
 2. ZIPを一時フォルダへ展開
-3. `.jpg` / `.jpeg` を libjxl で `.jxl` 化
-4. JPEG以外のファイルはそのままコピー
+3. 画像ファイルを libjxl で `.jxl` 化
+4. 画像以外のファイル、および変換できなかったファイルはそのままコピー
 5. 元のフォルダ構成を維持して再ZIP
 6. 元ZIPと同じフォルダに `元ファイル名_jxl.zip` を作成
 
-## JPEG XLへの変換方法
+## 対応形式
+
+JPEG だけでなく、Windows Imaging Component (WIC) がデコードできる形式を変換します。
+
+- 標準で読める形式 … JPEG / PNG / BMP / GIF / TIFF / ICO / JPEG XR
+- 拡張機能を入れると読める形式 … WebP / HEIF / AVIF
+
+libjxl 本体は画像ファイルのデコーダを持たず、エンコーダは画素を受け取ります。
+そのため JPEG 以外は WIC (WPFの `BitmapDecoder`) で画素へ展開してから渡しています。
+JPEG のみ、画素へ戻さない可逆transcodeが使えます。
+
+拡張子が対象でもデコードできなかった場合は、変換せずそのままコピーします。
+
+### 制限
+
+- 複数フレームを持つ画像（アニメーションGIF、マルチページTIFFなど）は1枚目のみ変換します
+- 1チャンネルあたり8bitを超える画像は8bitへ落として変換します
+- アルファチャンネルは保持します
+- ロスレス以外では EXIF などのメタデータは引き継がれません
+
+## 画質プリセット
+
+画面の「画質」から選択します。既定は **高画質** です。
+
+| プリセット | 変換 | distance | PSNR | SSIM | 出力サイズ (元JPEG比) |
+| --- | --- | --- | --- | --- | --- |
+| ロスレス | 可逆 | - | ∞ | 1.000 | 60〜85% |
+| 超高画質 | 再圧縮 | 0.5 | 38.7〜51.4 dB | 0.990以上 | 27〜130% |
+| 高画質（既定） | 再圧縮 | 1.0 | 36.2〜49.3 dB | 0.957以上 | 15〜76% |
+| 軽量 | 再圧縮 | 2.0 | 33.8〜47.8 dB | 0.865以上 | 9〜41% |
+| 最高圧縮 | 再圧縮 | 4.0 | 30.1〜46.1 dB | 0.774以上 | 4〜27% |
+
+PSNR / SSIM / サイズは、0.27〜8.07 bpp の **JPEG** 9枚で実測した範囲です。
+元のJPEGをデコードした画素を基準としています。
+PNGなど元々ロスレスな形式では比率が大きく変わります。
+
+### ロスレス
+
+画質を落としません。入力によって経路が変わります。
+
+- JPEG … 画素へ戻さずtranscodeします。元のJPEGをバイト単位で復元でき、EXIFなども保持されます
+- JPEG以外 … 画素をそのまま符号化します。画素は完全に一致しますが、元のファイル形式へは戻せません
+
+### 再圧縮（超高画質 〜 最高圧縮）
+
+画素へデコードし、指定した `distance` で不可逆に再圧縮します。
+`distance` が小さいほど高画質・大きいほど小サイズで、`1.0` が
+「視覚的に劣化なし」とされるlibjxlの既定値です。
+
+なお、既に強く圧縮されたJPEG（1 bpp未満など）や、PNGのような元々ロスレスな画像を
+小さい `distance` で再圧縮すると、ロスレスより大きくなることがあります。
+
+## 実装
 
 外部プロセス (`cjxl.exe`) は使用せず、
-[JxlNet](https://www.nuget.org/packages/JxlNet) 経由で libjxl を直接呼び出します。
+[JxlNet](https://www.nuget.org/packages/JxlNet) 経由で libjxl を直接呼び出します
+(`JxlTranscoder`)。
 
-`JxlTranscoder` は以下のAPIを使用します。
+- ロスレス (JPEG) … `JxlEncoderStoreJPEGMetadata` + `JxlEncoderUseContainer` + `JxlEncoderAddJPEGFrame`
+- ロスレス (その他) … `JxlEncoderSetFrameLossless` + `JxlEncoderAddImageFrame`
+- 再圧縮 … `JxlEncoderSetFrameDistance` + `JxlEncoderAddImageFrame`
 
-- `JxlEncoderStoreJPEGMetadata` … 元JPEGを復元するための再構成データを保持
-- `JxlEncoderUseContainer` … 再構成データの格納にはコンテナ形式が必要
-- `JxlEncoderAddJPEGFrame` … JPEGを画素へデコードせずlossless transcode
+### ZIP内のファイル名
 
-そのため、生成された `.jxl` からは元のJPEGをバイト単位で復元できます。
-（lossy再エンコードではありません）
+Windowsのエクスプローラなど多くのツールは、ZIPのエントリ名をUTF-8ではなく
+システム既定のANSIコードページ（日本語環境ではCP932）で書き込みます。
+.NET は既定でUTF-8として解釈するため、そのままでは日本語のファイル名が文字化けします。
+
+そのため展開時に `entryNameEncoding` へANSIコードページを指定しています。
+UTF-8フラグが立っているエントリは、この指定に関わらずUTF-8として読まれます。
+
+出力するZIPはUTF-8です。
 
 ## 必要なもの
 
@@ -44,8 +103,3 @@ dotnet build -c Release
 ```powershell
 dotnet run -c Release
 ```
-
-## 注意
-
-このツールは「JPEGをJXLへ変換する」ことに特化しています。
-PNGなどはそのままZIPへ残します。
