@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "JpegZipToJxl": {
+      "commandName": "Project",
+      "workingDirectory": "..\\..\\..\\"
+    }
+  }
+}
