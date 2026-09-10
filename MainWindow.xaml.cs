@@ -60,6 +60,9 @@ public partial class MainWindow : Window
             OverwriteOption.IsChecked = false;
     }
 
+    private static bool IsZip(string path)
+        => string.Equals(Path.GetExtension(path), ".zip", StringComparison.OrdinalIgnoreCase);
+
     private void Window_DragOver(object sender, DragEventArgs e)
     {
         if (_running)
@@ -71,9 +74,7 @@ public partial class MainWindow : Window
         if (e.Data.GetDataPresent(DataFormats.FileDrop))
         {
             var files = (string[])e.Data.GetData(DataFormats.FileDrop)!;
-            e.Effects = files.Length == 1 &&
-                        string.Equals(Path.GetExtension(files[0]), ".zip",
-                                      StringComparison.OrdinalIgnoreCase)
+            e.Effects = files.Length > 0 && files.All(IsZip)
                 ? DragDropEffects.Copy
                 : DragDropEffects.None;
         }
@@ -91,25 +92,213 @@ public partial class MainWindow : Window
             return;
 
         var files = (string[])e.Data.GetData(DataFormats.FileDrop)!;
-        if (files.Length != 1 ||
-            !string.Equals(Path.GetExtension(files[0]), ".zip",
-                           StringComparison.OrdinalIgnoreCase))
+        if (files.Length == 0 || !files.All(IsZip))
         {
-            MessageBox.Show("ZIPファイルを1つだけドロップしてください。",
+            MessageBox.Show("ZIPファイルだけをドロップしてください。",
                             "入力エラー", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        await ConvertZipAsync(files[0], (JxlPreset)PresetBox.SelectedItem,
-                              OverwriteOption.IsChecked == true);
+        await ConvertZipsAsync(files, (JxlPreset)PresetBox.SelectedItem,
+                               OverwriteOption.IsChecked == true);
     }
 
-    private async Task ConvertZipAsync(string inputZip, JxlPreset preset, bool overwriteSource)
+    /// <summary>処理中のZIPをまたいで共有する進捗。</summary>
+    private sealed class ConversionProgress
+    {
+        public int TotalFiles;
+        public int CompletedFiles;
+        public int ZipIndex;
+        public int ZipCount;
+        public string ZipName = "";
+    }
+
+    /// <summary>1つのZIPを処理した結果。</summary>
+    private readonly record struct ZipOutcome(
+        int Converted, int Copied, string? OutputPath, string? Error, bool CancelAll);
+
+    private async Task ConvertZipsAsync(string[] inputZips, JxlPreset preset, bool overwriteSource)
     {
         _running = true;
         SettingsBox.IsEnabled = false;
         Progress.Value = 0;
         LogBox.Clear();
+
+        try
+        {
+            Log(inputZips.Length == 1
+                ? $"入力: {inputZips[0]}"
+                : $"入力: {inputZips.Length} 個のZIP");
+
+            LogSettings(preset, overwriteSource);
+
+            // 展開せずに中央ディレクトリだけ読み、全体の変換対象数を数える。
+            var progress = new ConversionProgress { ZipCount = inputZips.Length };
+
+            foreach (var zip in inputZips)
+            {
+                try
+                {
+                    progress.TotalFiles += CountTargets(zip);
+                }
+                catch (Exception ex)
+                {
+                    Log($"読み取れません: {Path.GetFileName(zip)} ({ex.Message})");
+                }
+            }
+
+            if (progress.TotalFiles == 0)
+                throw new InvalidOperationException("ZIP内に変換できる画像ファイルがありません。");
+
+            Log($"変換対象: 合計 {progress.TotalFiles} ファイル");
+
+            int convertedTotal = 0;
+            int copiedTotal = 0;
+            int succeededZips = 0;
+            string? lastOutput = null;
+            var failures = new List<string>();
+
+            for (int i = 0; i < inputZips.Length; i++)
+            {
+                progress.ZipIndex = i + 1;
+                progress.ZipName = Path.GetFileName(inputZips[i]);
+
+                if (inputZips.Length > 1)
+                    Log($"--- [{progress.ZipIndex}/{progress.ZipCount}] {progress.ZipName}");
+
+                ZipOutcome outcome =
+                    await ConvertOneZipAsync(inputZips[i], preset, overwriteSource, progress);
+
+                convertedTotal += outcome.Converted;
+                copiedTotal += outcome.Copied;
+
+                if (outcome.Error != null)
+                {
+                    failures.Add($"{progress.ZipName}: {outcome.Error}");
+                    Log($"ERROR: {progress.ZipName} — {outcome.Error}");
+                }
+                else if (outcome.OutputPath != null)
+                {
+                    succeededZips++;
+                    lastOutput = outcome.OutputPath;
+                    Log($"出力: {outcome.OutputPath}");
+                }
+
+                if (outcome.CancelAll)
+                {
+                    Log("残りのZIPの処理を中止しました。");
+                    break;
+                }
+            }
+
+            Progress.Value = 100;
+            StatusText.Text = failures.Count == 0 ? "完了" : "完了（一部失敗）";
+            Log($"変換 {convertedTotal} ファイル / コピー {copiedTotal} ファイル");
+
+            ShowSummary(inputZips.Length, succeededZips, convertedTotal, copiedTotal,
+                        lastOutput, failures);
+        }
+        catch (Exception ex)
+        {
+            Log("ERROR: " + ex.Message);
+            StatusText.Text = "エラー";
+            MessageBox.Show(ex.ToString(), "変換エラー",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            SettingsBox.IsEnabled = true;
+            _running = false;
+        }
+    }
+
+    private void LogSettings(JxlPreset preset, bool overwriteSource)
+    {
+        if (preset.Options.Mode == JxlMode.Lossless)
+        {
+            Log($"画質: {preset.Name}");
+            Log("※ JPEGは元のファイルをバイト単位で復元できます。");
+            Log("※ JPEG以外は画素が一致しますが、元のファイル形式へは戻せません。");
+        }
+        else
+        {
+            Log($"画質: {preset.Name} (distance = {preset.Options.Distance:F1})");
+            Log("※ 不可逆変換です。EXIFなどのメタデータは引き継がれません。");
+        }
+
+        if (overwriteSource)
+            Log("出力: 元のZIPを上書きします。");
+    }
+
+    private void ShowSummary(int zipCount, int succeededZips, int converted, int copied,
+                             string? lastOutput, List<string> failures)
+    {
+        string message;
+
+        if (zipCount == 1 && failures.Count == 0 && lastOutput != null)
+        {
+            message = $"変換が完了しました。\n\n{lastOutput}";
+        }
+        else
+        {
+            message = $"{succeededZips}/{zipCount} 個のZIPを変換しました。\n"
+                    + $"変換 {converted} ファイル / コピー {copied} ファイル";
+
+            if (failures.Count > 0)
+                message += "\n\n処理できなかったZIP:\n" + string.Join("\n", failures);
+        }
+
+        MessageBox.Show(message,
+            failures.Count > 0 ? "完了（一部失敗）" : "完了",
+            MessageBoxButton.OK,
+            failures.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// ZIPを展開せずに、中央ディレクトリから変換対象の数を数える。
+    /// </summary>
+    private static int CountTargets(string zipPath)
+    {
+        using var archive = ZipFile.Open(zipPath, ZipArchiveMode.Read, ZipEntryNameEncoding);
+
+        // ディレクトリのエントリは Name が空になる。
+        return archive.Entries.Count(
+            entry => !string.IsNullOrEmpty(entry.Name) && JxlTranscoder.IsSupported(entry.Name));
+    }
+
+    private async Task<ZipOutcome> ConvertOneZipAsync(
+        string inputZip, JxlPreset preset, bool overwriteSource, ConversionProgress progress)
+    {
+        string inputDir = Path.GetDirectoryName(inputZip)!;
+        string outputZip = Path.Combine(
+            inputDir, Path.GetFileNameWithoutExtension(inputZip) + "_jxl.zip");
+
+        // 変換に時間をかけてから止まらないよう、出力先の確認は先に済ませる。
+        if (!overwriteSource && File.Exists(outputZip))
+        {
+            var answer = MessageBox.Show(
+                $"出力先が既に存在します。\n\n{outputZip}\n\n"
+                + "上書きしますか？\n"
+                + "「いいえ」でこのZIPをスキップ、「キャンセル」で全体を中止します。",
+                "確認", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+
+            if (answer == MessageBoxResult.Cancel)
+                return new ZipOutcome(0, 0, null, null, CancelAll: true);
+
+            if (answer != MessageBoxResult.Yes)
+            {
+                Log($"スキップしました: {Path.GetFileName(inputZip)}");
+                return new ZipOutcome(0, 0, null, null, CancelAll: false);
+            }
+
+            File.Delete(outputZip);
+        }
+
+        // 上書き時は、まず同じフォルダの一時ファイルへ書き出す。
+        // 変換が最後まで成功したときだけ、元のZIPと置き換える。
+        string zipTarget = overwriteSource
+            ? Path.Combine(inputDir, $".jxlconv_{Guid.NewGuid():N}.tmp")
+            : outputZip;
 
         string tempRoot = Path.Combine(Path.GetTempPath(),
             "JpegZipToJxl_" + Guid.NewGuid().ToString("N"));
@@ -120,21 +309,8 @@ public partial class MainWindow : Window
         Directory.CreateDirectory(extractDir);
         Directory.CreateDirectory(outputDir);
 
-        string inputDir = Path.GetDirectoryName(inputZip)!;
-        string outputZip = Path.Combine(
-            inputDir, Path.GetFileNameWithoutExtension(inputZip) + "_jxl.zip");
-
-        // 上書き時は、まず同じフォルダの一時ファイルへ書き出す。
-        // 変換が最後まで成功したときだけ、元のZIPと置き換える。
-        string zipTarget = overwriteSource
-            ? Path.Combine(inputDir, $".jxlconv_{Guid.NewGuid():N}.tmp")
-            : outputZip;
-
         try
         {
-            Log($"入力: {inputZip}");
-            Log("ZIPを展開しています...");
-
             await Task.Run(() => ZipFile.ExtractToDirectory(
                 inputZip, extractDir, ZipEntryNameEncoding, overwriteFiles: true));
 
@@ -144,31 +320,11 @@ public partial class MainWindow : Window
             var targets = allFiles.Where(JxlTranscoder.IsSupported).ToList();
 
             if (targets.Count == 0)
-            {
-                throw new InvalidOperationException("ZIP内に変換できる画像ファイルがありません。");
-            }
-
-            Log($"変換対象: {targets.Count} ファイル");
-            Log(overwriteSource
-                ? "出力: 元のZIPを上書きします。"
-                : $"出力: {outputZip}");
-
-            if (preset.Options.Mode == JxlMode.Lossless)
-            {
-                Log($"画質: {preset.Name}");
-                Log("※ JPEGは元のファイルをバイト単位で復元できます。");
-                Log("※ JPEG以外は画素が一致しますが、元のファイル形式へは戻せません。");
-            }
-            else
-            {
-                Log($"画質: {preset.Name} (distance = {preset.Options.Distance:F1})");
-                Log("※ 不可逆変換です。EXIFなどのメタデータは引き継がれません。");
-            }
+                throw new InvalidOperationException("変換できる画像ファイルがありません。");
 
             // 拡張子を .jxl へ変えると別形式の同名ファイル同士が衝突しうるため、
             // 使用済みの出力パスを覚えておく。
             var usedOutputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            int completed = 0;
             int converted = 0;
             int copied = 0;
 
@@ -197,9 +353,7 @@ public partial class MainWindow : Window
                     copied++;
                 }
 
-                completed++;
-                Progress.Value = completed * 100.0 / targets.Count;
-                StatusText.Text = $"{completed}/{targets.Count}: {relative}";
+                ReportProgress(progress, relative);
             }
 
             // 画像以外のファイル（txt等）はそのままコピー
@@ -221,19 +375,6 @@ public partial class MainWindow : Window
                     "変換できたファイルが1つも無いため、元のZIPは変更していません。");
             }
 
-            if (!overwriteSource && File.Exists(outputZip))
-            {
-                var result = MessageBox.Show(
-                    $"出力先が既に存在します。\n\n{outputZip}\n\n上書きしますか？",
-                    "確認", MessageBoxButton.YesNo, MessageBoxImage.Question);
-
-                if (result != MessageBoxResult.Yes)
-                    return;
-
-                File.Delete(outputZip);
-            }
-
-            Log("変換後ZIPを作成しています...");
             await Task.Run(() => ZipFile.CreateFromDirectory(
                 outputDir, zipTarget, CompressionLevel.Optimal, includeBaseDirectory: false));
 
@@ -249,30 +390,20 @@ public partial class MainWindow : Window
                 catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
                 {
                     throw new InvalidOperationException(
-                        "元のZIPを置き換えられませんでした。元のZIPはそのまま残っています。\n"
-                        + "読み取り専用になっていないか、他のプログラムが開いていないかご確認ください。\n\n"
-                        + inputZip, ex);
+                        "元のZIPを置き換えられませんでした。元のZIPはそのまま残っています。"
+                        + "読み取り専用になっていないか、他のプログラムが開いていないかご確認ください。",
+                        ex);
                 }
 
                 finalZip = inputZip;
                 Log("元のZIPを置き換えました。");
             }
 
-            Progress.Value = 100;
-            StatusText.Text = "完了";
-            Log($"変換 {converted} ファイル / コピー {copied} ファイル");
-            Log($"出力: {finalZip}");
-
-            MessageBox.Show(
-                $"変換が完了しました。\n\n{finalZip}",
-                "完了", MessageBoxButton.OK, MessageBoxImage.Information);
+            return new ZipOutcome(converted, copied, finalZip, null, CancelAll: false);
         }
         catch (Exception ex)
         {
-            Log("ERROR: " + ex.Message);
-            StatusText.Text = "エラー";
-            MessageBox.Show(ex.ToString(), "変換エラー",
-                MessageBoxButton.OK, MessageBoxImage.Error);
+            return new ZipOutcome(0, 0, null, ex.Message.ReplaceLineEndings(" "), CancelAll: false);
         }
         finally
         {
@@ -289,10 +420,24 @@ public partial class MainWindow : Window
             {
                 // 後始末失敗は本処理の失敗にはしない
             }
-
-            SettingsBox.IsEnabled = true;
-            _running = false;
         }
+    }
+
+    /// <summary>
+    /// 全ZIPの変換対象数を分母として進捗を更新する。
+    /// </summary>
+    private void ReportProgress(ConversionProgress progress, string relative)
+    {
+        progress.CompletedFiles++;
+
+        // 事前に数えた件数と実際の件数が食い違っても、バーが振り切れないようにする。
+        Progress.Value = Math.Min(
+            100.0, progress.CompletedFiles * 100.0 / progress.TotalFiles);
+
+        StatusText.Text = progress.ZipCount == 1
+            ? $"{progress.CompletedFiles}/{progress.TotalFiles}: {relative}"
+            : $"[{progress.ZipIndex}/{progress.ZipCount}] {progress.ZipName} — "
+              + $"{progress.CompletedFiles}/{progress.TotalFiles}: {relative}";
     }
 
     /// <summary>
