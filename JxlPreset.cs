@@ -35,9 +35,6 @@ internal sealed record JxlPreset(string Name, string Description, JxlOptions Opt
             new JxlOptions(JxlMode.Recompress, Distance: 4.0f)),
     ];
 
-    /// <summary>初期選択（高画質）。</summary>
+    /// <summary>スライダの初期位置（高画質）。</summary>
     public static int DefaultIndex => 2;
-
-    /// <summary>ComboBoxにはプリセット名だけを表示する。</summary>
-    public override string ToString() => Name;
 }

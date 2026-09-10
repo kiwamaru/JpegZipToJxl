@@ -29,8 +29,43 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        PresetBox.ItemsSource = JxlPreset.All;
-        PresetBox.SelectedIndex = JxlPreset.DefaultIndex;
+        BuildPresetLabels();
+
+        // ラベルを作ってから動かす。ValueChanged で選択中の表示が更新される。
+        PresetSlider.Value = JxlPreset.DefaultIndex;
+    }
+
+    private JxlPreset SelectedPreset => JxlPreset.All[(int)PresetSlider.Value];
+
+    /// <summary>スライダの目盛りに対応するプリセット名を並べる。</summary>
+    private void BuildPresetLabels()
+    {
+        int count = JxlPreset.All.Count;
+
+        for (int i = 0; i < count; i++)
+        {
+            bool isEnd = i == 0 || i == count - 1;
+
+            // 両端の目盛りはトラックの端に来るため、端の列は中間の半分の幅にして
+            // ラベルの位置を目盛りに合わせる。
+            PresetLabels.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = new GridLength(isEnd ? 1 : 2, GridUnitType.Star)
+            });
+
+            var label = new TextBlock
+            {
+                Text = JxlPreset.All[i].Name,
+                FontSize = 11,
+                TextWrapping = TextWrapping.NoWrap,
+                HorizontalAlignment = i == 0 ? HorizontalAlignment.Left
+                                    : i == count - 1 ? HorizontalAlignment.Right
+                                    : HorizontalAlignment.Center
+            };
+
+            Grid.SetColumn(label, i);
+            PresetLabels.Children.Add(label);
+        }
     }
 
     private static Encoding CreateZipEntryNameEncoding()
@@ -48,10 +83,25 @@ public partial class MainWindow : Window
         }
     }
 
-    // JxlPreset は internal のため、説明文はバインディングではなくコードで反映する。
-    private void PresetBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void PresetSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        PresetDescription.Text = ((JxlPreset)PresetBox.SelectedItem).Description;
+        // XAMLの初期化順によっては、ラベルより先に値が入ることがある。
+        if (PresetLabels is null || PresetLabels.Children.Count == 0)
+            return;
+
+        int index = (int)PresetSlider.Value;
+        PresetDescription.Text = JxlPreset.All[index].Description;
+
+        for (int i = 0; i < PresetLabels.Children.Count; i++)
+        {
+            var label = (TextBlock)PresetLabels.Children[i];
+            bool selected = i == index;
+
+            label.FontWeight = selected ? FontWeights.Bold : FontWeights.Normal;
+            label.Foreground = selected
+                ? SystemColors.ControlTextBrush
+                : SystemColors.GrayTextBrush;
+        }
     }
 
     // 元のZIPが失われる設定のため、オンにした時点で一度だけ確認する。
@@ -114,8 +164,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        await ConvertZipsAsync(files, (JxlPreset)PresetBox.SelectedItem,
-                               OverwriteOption.IsChecked == true);
+        await ConvertZipsAsync(files, SelectedPreset, OverwriteOption.IsChecked == true);
     }
 
     /// <summary>処理中のZIPをまたいで共有する進捗。</summary>
