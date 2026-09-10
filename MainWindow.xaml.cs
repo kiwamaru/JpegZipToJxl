@@ -16,6 +16,13 @@ public partial class MainWindow : Window
     /// </summary>
     private static readonly Encoding ZipEntryNameEncoding = CreateZipEntryNameEncoding();
 
+    /// <summary>
+    /// 同時に変換するファイル数。コア数を増やしても頭打ちになる一方で
+    /// 画像1枚ぶんのメモリを並列数だけ抱えるため、上限を設ける。
+    /// </summary>
+    private static readonly int MaxParallelism = Math.Clamp(Environment.ProcessorCount, 1, 8);
+
+    private CancellationTokenSource? _cancellation;
     private bool _running;
 
     public MainWindow()
@@ -58,6 +65,14 @@ public partial class MainWindow : Window
 
         if (result != MessageBoxResult.Yes)
             OverwriteOption.IsChecked = false;
+    }
+
+    private void CancelButton_Click(object sender, RoutedEventArgs e)
+    {
+        _cancellation?.Cancel();
+
+        CancelButton.IsEnabled = false;
+        StatusText.Text = "中止しています...";
     }
 
     private static bool IsZip(string path)
@@ -115,12 +130,16 @@ public partial class MainWindow : Window
 
     /// <summary>1つのZIPを処理した結果。</summary>
     private readonly record struct ZipOutcome(
-        int Converted, int Copied, string? OutputPath, string? Error, bool CancelAll);
+        int Converted, int Copied, string? OutputPath, string? Error, bool Cancelled);
 
     private async Task ConvertZipsAsync(string[] inputZips, JxlPreset preset, bool overwriteSource)
     {
         _running = true;
+        _cancellation = new CancellationTokenSource();
+        CancellationToken token = _cancellation.Token;
+
         SettingsBox.IsEnabled = false;
+        CancelButton.IsEnabled = true;
         Progress.Value = 0;
         LogBox.Clear();
 
@@ -155,6 +174,7 @@ public partial class MainWindow : Window
             int convertedTotal = 0;
             int copiedTotal = 0;
             int succeededZips = 0;
+            bool cancelled = false;
             string? lastOutput = null;
             var failures = new List<string>();
 
@@ -166,11 +186,18 @@ public partial class MainWindow : Window
                 if (inputZips.Length > 1)
                     Log($"--- [{progress.ZipIndex}/{progress.ZipCount}] {progress.ZipName}");
 
-                ZipOutcome outcome =
-                    await ConvertOneZipAsync(inputZips[i], preset, overwriteSource, progress);
+                ZipOutcome outcome = await ConvertOneZipAsync(
+                    inputZips[i], preset, overwriteSource, progress, token);
 
                 convertedTotal += outcome.Converted;
                 copiedTotal += outcome.Copied;
+
+                if (outcome.Cancelled)
+                {
+                    cancelled = true;
+                    Log("中止しました。作成中のZIPは残していません。");
+                    break;
+                }
 
                 if (outcome.Error != null)
                 {
@@ -183,20 +210,16 @@ public partial class MainWindow : Window
                     lastOutput = outcome.OutputPath;
                     Log($"出力: {outcome.OutputPath}");
                 }
-
-                if (outcome.CancelAll)
-                {
-                    Log("残りのZIPの処理を中止しました。");
-                    break;
-                }
             }
 
-            Progress.Value = 100;
-            StatusText.Text = failures.Count == 0 ? "完了" : "完了（一部失敗）";
+            if (!cancelled)
+                Progress.Value = 100;
+
+            StatusText.Text = cancelled ? "中止" : failures.Count == 0 ? "完了" : "完了（一部失敗）";
             Log($"変換 {convertedTotal} ファイル / コピー {copiedTotal} ファイル");
 
             ShowSummary(inputZips.Length, succeededZips, convertedTotal, copiedTotal,
-                        lastOutput, failures);
+                        lastOutput, failures, cancelled);
         }
         catch (Exception ex)
         {
@@ -207,6 +230,10 @@ public partial class MainWindow : Window
         }
         finally
         {
+            _cancellation.Dispose();
+            _cancellation = null;
+
+            CancelButton.IsEnabled = false;
             SettingsBox.IsEnabled = true;
             _running = false;
         }
@@ -228,11 +255,21 @@ public partial class MainWindow : Window
 
         if (overwriteSource)
             Log("出力: 元のZIPを上書きします。");
+
+        Log($"同時変換数: {MaxParallelism}");
     }
 
     private void ShowSummary(int zipCount, int succeededZips, int converted, int copied,
-                             string? lastOutput, List<string> failures)
+                             string? lastOutput, List<string> failures, bool cancelled)
     {
+        if (cancelled)
+        {
+            MessageBox.Show(
+                $"変換を中止しました。\n\n変換済み {converted} ファイル分は破棄されています。",
+                "中止", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
         string message;
 
         if (zipCount == 1 && failures.Count == 0 && lastOutput != null)
@@ -267,7 +304,8 @@ public partial class MainWindow : Window
     }
 
     private async Task<ZipOutcome> ConvertOneZipAsync(
-        string inputZip, JxlPreset preset, bool overwriteSource, ConversionProgress progress)
+        string inputZip, JxlPreset preset, bool overwriteSource,
+        ConversionProgress progress, CancellationToken token)
     {
         string inputDir = Path.GetDirectoryName(inputZip)!;
         string outputZip = Path.Combine(
@@ -283,12 +321,12 @@ public partial class MainWindow : Window
                 "確認", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
 
             if (answer == MessageBoxResult.Cancel)
-                return new ZipOutcome(0, 0, null, null, CancelAll: true);
+                return new ZipOutcome(0, 0, null, null, Cancelled: true);
 
             if (answer != MessageBoxResult.Yes)
             {
                 Log($"スキップしました: {Path.GetFileName(inputZip)}");
-                return new ZipOutcome(0, 0, null, null, CancelAll: false);
+                return new ZipOutcome(0, 0, null, null, Cancelled: false);
             }
 
             File.Delete(outputZip);
@@ -312,7 +350,9 @@ public partial class MainWindow : Window
         try
         {
             await Task.Run(() => ZipFile.ExtractToDirectory(
-                inputZip, extractDir, ZipEntryNameEncoding, overwriteFiles: true));
+                inputZip, extractDir, ZipEntryNameEncoding, overwriteFiles: true), token);
+
+            token.ThrowIfCancellationRequested();
 
             var allFiles = Directory.EnumerateFiles(
                 extractDir, "*", SearchOption.AllDirectories).ToList();
@@ -322,43 +362,55 @@ public partial class MainWindow : Window
             if (targets.Count == 0)
                 throw new InvalidOperationException("変換できる画像ファイルがありません。");
 
-            // 拡張子を .jxl へ変えると別形式の同名ファイル同士が衝突しうるため、
-            // 使用済みの出力パスを覚えておく。
+            // 出力名の解決は既存名との衝突判定を伴うため、並列化する前に済ませる。
+            // 拡張子を .jxl へ変えると別形式の同名ファイル同士が衝突しうる。
             var usedOutputs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            int converted = 0;
-            int copied = 0;
+            var jobs = new List<(string Input, string Relative, string Output)>(targets.Count);
 
             foreach (var inputFile in targets)
             {
                 string relative = Path.GetRelativePath(extractDir, inputFile);
-                string outputFile = Path.Combine(
-                    outputDir, ResolveOutputName(relative, usedOutputs));
+                string output = Path.Combine(outputDir, ResolveOutputName(relative, usedOutputs));
 
-                Directory.CreateDirectory(Path.GetDirectoryName(outputFile)!);
+                Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+                jobs.Add((inputFile, relative, output));
+            }
 
-                string? failure = await EncodeAsync(inputFile, outputFile, preset.Options, Log);
+            int converted = 0;
+            int copied = 0;
+
+            await Parallel.ForEachAsync(jobs, new ParallelOptions
+            {
+                MaxDegreeOfParallelism = MaxParallelism,
+                CancellationToken = token
+            },
+            async (job, ct) =>
+            {
+                string? failure = await EncodeAsync(job.Input, job.Output, preset.Options, Log, ct);
 
                 if (failure == null)
                 {
-                    converted++;
+                    Interlocked.Increment(ref converted);
                 }
                 else
                 {
                     // デコードできない形式や壊れたファイルは、変換せずそのまま残す。
-                    Log($"変換できないためコピーします: {relative} ({failure})");
+                    Log($"変換できないためコピーします: {job.Relative} ({failure})");
 
-                    string dest = Path.Combine(outputDir, relative);
+                    string dest = Path.Combine(outputDir, job.Relative);
                     Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                    File.Copy(inputFile, dest, overwrite: true);
-                    copied++;
+                    File.Copy(job.Input, dest, overwrite: true);
+                    Interlocked.Increment(ref copied);
                 }
 
-                ReportProgress(progress, relative);
-            }
+                ReportProgress(progress, job.Relative);
+            });
 
             // 画像以外のファイル（txt等）はそのままコピー
             foreach (var other in allFiles)
             {
+                token.ThrowIfCancellationRequested();
+
                 if (JxlTranscoder.IsSupported(other))
                     continue;
 
@@ -375,8 +427,11 @@ public partial class MainWindow : Window
                     "変換できたファイルが1つも無いため、元のZIPは変更していません。");
             }
 
+            token.ThrowIfCancellationRequested();
+
             await Task.Run(() => ZipFile.CreateFromDirectory(
-                outputDir, zipTarget, CompressionLevel.Optimal, includeBaseDirectory: false));
+                outputDir, zipTarget, CompressionLevel.Optimal, includeBaseDirectory: false),
+                CancellationToken.None);
 
             string finalZip = outputZip;
 
@@ -399,11 +454,15 @@ public partial class MainWindow : Window
                 Log("元のZIPを置き換えました。");
             }
 
-            return new ZipOutcome(converted, copied, finalZip, null, CancelAll: false);
+            return new ZipOutcome(converted, copied, finalZip, null, Cancelled: false);
+        }
+        catch (OperationCanceledException)
+        {
+            return new ZipOutcome(0, 0, null, null, Cancelled: true);
         }
         catch (Exception ex)
         {
-            return new ZipOutcome(0, 0, null, ex.Message.ReplaceLineEndings(" "), CancelAll: false);
+            return new ZipOutcome(0, 0, null, ex.Message.ReplaceLineEndings(" "), Cancelled: false);
         }
         finally
         {
@@ -412,7 +471,7 @@ public partial class MainWindow : Window
                 if (Directory.Exists(tempRoot))
                     Directory.Delete(tempRoot, recursive: true);
 
-                // 置き換えに至らなかった場合、一時ファイルが残る
+                // 中止したときや置き換えに至らなかったとき、一時ファイルが残る
                 if (overwriteSource && File.Exists(zipTarget))
                     File.Delete(zipTarget);
             }
@@ -424,20 +483,25 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 全ZIPの変換対象数を分母として進捗を更新する。
+    /// 全ZIPの変換対象数を分母として進捗を更新する。並列変換から呼ばれる。
     /// </summary>
     private void ReportProgress(ConversionProgress progress, string relative)
     {
-        progress.CompletedFiles++;
+        int completed = Interlocked.Increment(ref progress.CompletedFiles);
 
         // 事前に数えた件数と実際の件数が食い違っても、バーが振り切れないようにする。
-        Progress.Value = Math.Min(
-            100.0, progress.CompletedFiles * 100.0 / progress.TotalFiles);
+        double percent = Math.Min(100.0, completed * 100.0 / progress.TotalFiles);
 
-        StatusText.Text = progress.ZipCount == 1
-            ? $"{progress.CompletedFiles}/{progress.TotalFiles}: {relative}"
+        string text = progress.ZipCount == 1
+            ? $"{completed}/{progress.TotalFiles}: {relative}"
             : $"[{progress.ZipIndex}/{progress.ZipCount}] {progress.ZipName} — "
-              + $"{progress.CompletedFiles}/{progress.TotalFiles}: {relative}";
+              + $"{completed}/{progress.TotalFiles}: {relative}";
+
+        Dispatcher.InvokeAsync(() =>
+        {
+            Progress.Value = percent;
+            StatusText.Text = text;
+        });
     }
 
     /// <summary>
@@ -462,16 +526,16 @@ public partial class MainWindow : Window
     /// 1ファイルを変換する。変換できなかった場合はその理由を返す。
     /// </summary>
     private static async Task<string?> EncodeAsync(
-        string input, string output, JxlOptions options, Action<string> log)
+        string input, string output, JxlOptions options, Action<string> log, CancellationToken token)
     {
-        byte[] source = await File.ReadAllBytesAsync(input);
+        byte[] source = await File.ReadAllBytesAsync(input, token);
 
         JxlResult result;
         try
         {
-            result = await Task.Run(() => JxlTranscoder.Encode(source, options));
+            result = await Task.Run(() => JxlTranscoder.Encode(source, options), token);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return ex.Message.ReplaceLineEndings(" ");
         }
@@ -479,7 +543,7 @@ public partial class MainWindow : Window
         if (result.Warning != null)
             log($"注意: {Path.GetFileName(input)} — {result.Warning}");
 
-        await File.WriteAllBytesAsync(output, result.Data);
+        await File.WriteAllBytesAsync(output, result.Data, token);
         return null;
     }
 

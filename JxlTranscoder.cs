@@ -186,10 +186,16 @@ internal static unsafe class JxlTranscoder
         if (IsHighBitDepth(frame.Format))
             warnings.Add("8bitへ変換");
 
+        // WICはEXIFのOrientationを反映しないため、ここで画素を回しておく。
+        // これを行わないと、スマートフォンの写真などが横倒しのまま変換される。
+        ushort orientation = ReadOrientation(frame);
+
         // グレースケール・パレット・CMYKなどもあるため、8bitのBGRAへ揃える。
         // Pbgra32 (乗算済みアルファ) もここで非乗算へ戻る。
         if (frame.Format != PixelFormats.Bgra32)
             frame = new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
+
+        frame = ApplyOrientation(frame, orientation);
 
         int width = frame.PixelWidth;
         int height = frame.PixelHeight;
@@ -224,6 +230,61 @@ internal static unsafe class JxlTranscoder
 
         return new DecodedImage(pixels, width, height, hasAlpha,
             warnings.Count == 0 ? null : string.Join(" / ", warnings));
+    }
+
+    /// <summary>
+    /// EXIF の Orientation (1〜8) を読む。無ければ 1 を返す。
+    /// </summary>
+    private static ushort ReadOrientation(BitmapSource frame)
+    {
+        if (frame.Metadata is not BitmapMetadata metadata)
+            return 1;
+
+        // JPEGはAPP1、TIFFは先頭のIFDに入っている。
+        foreach (string query in (string[])["/app1/ifd/{ushort=274}", "/ifd/{ushort=274}"])
+        {
+            try
+            {
+                if (metadata.GetQuery(query) is ushort value)
+                    return value;
+            }
+            catch (Exception)
+            {
+                // クエリに対応しない形式では例外になるため、次を試す
+            }
+        }
+
+        return 1;
+    }
+
+    /// <summary>
+    /// EXIF の Orientation に従って画素を並べ替える。
+    /// </summary>
+    private static BitmapSource ApplyOrientation(BitmapSource source, ushort orientation)
+    {
+        if (orientation is <= 1 or > 8)
+            return source;
+
+        var transform = new TransformGroup();
+
+        // 5〜8 は「反転してから回す」と定義されている。
+        if (orientation is 2 or 4 or 5 or 7)
+            transform.Children.Add(new ScaleTransform(-1, 1));
+
+        double angle = orientation switch
+        {
+            3 or 4 => 180,
+            6 or 7 => 90,
+            5 or 8 => 270,
+            _ => 0
+        };
+
+        if (angle != 0)
+            transform.Children.Add(new RotateTransform(angle));
+
+        var rotated = new TransformedBitmap(source, transform);
+        rotated.Freeze();
+        return rotated;
     }
 
     /// <summary>
