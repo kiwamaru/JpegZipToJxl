@@ -17,11 +17,7 @@ public partial class MainWindow : Window
     /// </summary>
     private static readonly Encoding ZipEntryNameEncoding = CreateZipEntryNameEncoding();
 
-    /// <summary>
-    /// 同時に変換するファイル数。コア数を増やしても頭打ちになる一方で
-    /// 画像1枚ぶんのメモリを並列数だけ抱えるため、上限を設ける。
-    /// </summary>
-    private static readonly int MaxParallelism = Math.Clamp(Environment.ProcessorCount, 1, 8);
+    private static readonly int MaxParallelism = Environment.ProcessorCount;
 
     private CancellationTokenSource? _cancellation;
     private bool _running;
